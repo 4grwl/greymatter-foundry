@@ -1,0 +1,26 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "foundry-headless",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "foundry", "--ticks", "28800", "--agents", "5", "--seed", "42"],
+      "port": 0,
+      "autoPort": true
+    },
+    {
+      "name": "foundry-gui",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "foundry", "--gui", "--gui-speed", "10", "--agents", "5", "--seed", "42"],
+      "port": 0,
+      "autoPort": true
+    },
+    {
+      "name": "foundry-tui",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "foundry", "--tui", "--agents", "5", "--seed", "42"],
+      "port": 0,
+      "autoPort": true
+    }
+  ]
+}
