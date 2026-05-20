@@ -1,0 +1,81 @@
+# Greymatter Foundry — default warehouse layout
+# 50 cols × 30 rows
+# (0,0) is top-left; row 29 is the dock wall (south)
+#
+# Layout overview:
+#
+#   row  0    : charging stations + top buffer aisle
+#   rows 2-27 : 6 rack bays separated by 5 aisles (each 1 col wide)
+#               bays span cols 1-8, 10-17, 19-26, 28-35, 37-44, 46-48
+#               aisles at cols 9, 18, 27, 36, 45  (plus outer at 0 and 49)
+#   row 28    : cross-aisle (full row, traversable)
+#   row 29    : dock wall — all RACK except 3 dock doors
+
+rows: 30
+cols: 50
+
+zones:
+  # ── Entire grid starts as AISLE (traversable) by default in the loader.
+  #    We overlay RACK zones and special cells on top.
+
+  # ── Rack bay 1  (cols 1–8, rows 2–27) ──
+  - type: RACK
+    row_start: 2
+    row_end:   27
+    col_start: 1
+    col_end:   8
+
+  # ── Rack bay 2  (cols 10–17, rows 2–27) ──
+  - type: RACK
+    row_start: 2
+    row_end:   27
+    col_start: 10
+    col_end:   17
+
+  # ── Rack bay 3  (cols 19–26, rows 2–27) ──
+  - type: RACK
+    row_start: 2
+    row_end:   27
+    col_start: 19
+    col_end:   26
+
+  # ── Rack bay 4  (cols 28–35, rows 2–27) ──
+  - type: RACK
+    row_start: 2
+    row_end:   27
+    col_start: 28
+    col_end:   35
+
+  # ── Rack bay 5  (cols 37–44, rows 2–27) ──
+  - type: RACK
+    row_start: 2
+    row_end:   27
+    col_start: 37
+    col_end:   44
+
+  # ── Rack bay 6  (cols 46–48, rows 2–27) ──
+  - type: RACK
+    row_start: 2
+    row_end:   27
+    col_start: 46
+    col_end:   48
+
+  # ── Dock wall  (row 29, all cols except dock doors) ──
+  - type: RACK
+    row_start: 29
+    row_end:   29
+    col_start: 0
+    col_end:   49
+
+  # ── 3 Dock doors cut into the south wall ──
+  - type: DOCK
+    cells:
+      - [29, 9]
+      - [29, 24]
+      - [29, 40]
+
+  # ── 2 Charging stations in the top-left and top-right corners ──
+  - type: CHARGING
+    cells:
+      - [0, 0]
+      - [0, 49]
