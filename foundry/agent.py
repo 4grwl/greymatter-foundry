@@ -31,6 +31,12 @@ BATTERY_DRAIN_PER_STEP = 0.5    # % battery lost per movement step
 BATTERY_CHARGE_PER_TICK= 2.0    # % battery gained per tick at charger
 LOW_BATTERY_THRESHOLD  = 20.0   # go charge after drop if below this
 
+# Congestion back-off: when a cell is blocked, an agent waits this many ticks
+# before attempting to move again (staggered by priority so agents don't all
+# retry simultaneously, which would just reproduce the same deadlock).
+_CONGESTION_WAIT_BASE  = 2      # ticks to wait per congestion event
+_CONGESTION_WAIT_JITTER = 3     # modulus for per-agent stagger (0, 1, 2 extra)
+
 
 @dataclass
 class PickTask:
@@ -66,6 +72,14 @@ class Agent:
 
         # Action countdown (PICKING / DROPPING)
         self._action_ticks: int = 0
+
+        # Congestion back-off counter: agent won't attempt movement while > 0
+        self._congestion_wait: int = 0
+        # Priority derived from agent ID number (AMR-00 → 0, AMR-01 → 1, …)
+        try:
+            self._priority: int = int(agent_id.split("-")[-1])
+        except (ValueError, IndexError):
+            self._priority = 0
 
         # Cumulative stats
         self.steps_taken:       int = 0
@@ -214,6 +228,12 @@ class Agent:
     ) -> None:
         if not self._path:
             return
+
+        # Back-off: agent yielding after a congestion event — just count down.
+        if self._congestion_wait > 0:
+            self._congestion_wait -= 1
+            return
+
         next_cell = self._path[0]
         if next_cell not in occupied:
             self._path.pop(0)
@@ -221,13 +241,19 @@ class Agent:
             self.steps_taken += 1
             self.battery_pct = max(0.0, self.battery_pct - BATTERY_DRAIN_PER_STEP)
         else:
-            # Cell blocked — reroute around occupant
+            # Cell blocked — record event, set a staggered wait, then let the
+            # state machine's "path exhausted" branch replan after the wait.
+            # Priority stagger ensures agents don't all retry on the same tick,
+            # which breaks head-on and convoy deadlocks.
+            self._congestion_wait = (
+                _CONGESTION_WAIT_BASE + self._priority % _CONGESTION_WAIT_JITTER
+            )
             self.congestion_events += 1
             events.append({"type": "CONGESTION", "agent": self.agent_id,
                            "pos": self.position, "blocked": next_cell})
-            path = grid.astar(self.position, self._target,
-                              occupied - {self.position, self._target})
-            self._path = path[1:] if path else []
+            # Clear path so the state machine calls _navigate_to after the wait,
+            # using the then-current occupied set rather than today's snapshot.
+            self._path = []
 
 
 # ------------------------------------------------------------------

@@ -82,11 +82,22 @@ class Simulation:
         # 2. Dispatch pending orders to idle agents
         self._dispatch()
 
-        # 3. Tick each agent
+        # 3. Tick each agent.
+        # `occupied` is updated after every move so later agents in the loop
+        # see the real current positions — this dissolves convoy pile-ups where
+        # a trailing agent can only move once the one ahead of it has stepped
+        # forward.  Combined with the per-agent back-off in Agent._move_step,
+        # this also breaks head-on deadlocks without expensive cooperative
+        # path planning.
         occupied = {a.position for a in self.agents}
         for agent in self.agents:
-            others = occupied - {agent.position}
-            evts = agent.tick(self.grid, others, self.clock)
+            old_pos = agent.position
+            others  = occupied - {old_pos}
+            evts    = agent.tick(self.grid, others, self.clock)
+            # Keep occupied consistent for agents processed later this tick.
+            if agent.position != old_pos:
+                occupied.discard(old_pos)
+                occupied.add(agent.position)
             self.events.extend(evts)
             for evt in evts:
                 self._handle_event(evt)
@@ -204,10 +215,15 @@ def _spread_start_positions(
 ) -> list[tuple[int, int]]:
     """
     Return n_agents unique traversable starting cells spread around the docks.
-    Expands outward from each dock until enough unique cells are found.
+
+    Agents should NOT start on dock cells — those are reserved as drop-off
+    points and an agent parked on a dock would immediately block returning
+    agents from completing their orders.  We skip dock cells during BFS
+    expansion, preferring the open aisle cells directly above them.
     """
     from collections import deque as _deque
 
+    dock_set = set(docks)
     positions: list[tuple[int, int]] = []
     used: set[tuple[int, int]] = set()
 
@@ -220,7 +236,8 @@ def _spread_start_positions(
 
     while queue and len(positions) < n_agents:
         cell = queue.popleft()
-        if cell not in used and grid.traversable(*cell):
+        # Skip dock cells: agents start one step away so docks stay clear.
+        if cell not in used and grid.traversable(*cell) and cell not in dock_set:
             positions.append(cell)
             used.add(cell)
         for nb in grid.traversable_neighbours(*cell):
@@ -228,7 +245,7 @@ def _spread_start_positions(
                 visited.add(nb)
                 queue.append(nb)
 
-    # Fallback: repeat dock positions if grid too small
+    # Fallback: use dock positions only if the grid is too small
     while len(positions) < n_agents:
         positions.append(docks[len(positions) % len(docks)])
 
