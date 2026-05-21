@@ -1143,9 +1143,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._json(self.state.get_zones_payload())
         elif path == "/chat-info":
             import foundry.chat as _chat
+            provider = _chat._PROVIDER
+            if provider == "openai":
+                api_set = bool(os.environ.get("OPENAI_API_KEY"))
+            else:
+                api_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
             self._json({
-                "model":   _chat._MODEL,
-                "api_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+                "model":    _chat._MODEL,
+                "provider": provider,
+                "api_set":  api_set,
             })
         else:
             self.send_error(404)
@@ -1377,7 +1383,18 @@ class WarehouseWebServer:
         with socketserver.ThreadingTCPServer(("", self.port), _Handler) as srv:
             srv.allow_reuse_address = True
             print(f"Foundry web GUI → http://localhost:{self.port}")
-            print(f"AI assistant:    {'enabled ✓' if os.environ.get('ANTHROPIC_API_KEY') else 'set ANTHROPIC_API_KEY to enable'}")
+            import foundry.chat as _chat
+            _ai_ok = (
+                bool(os.environ.get("OPENAI_API_KEY"))
+                if _chat._PROVIDER == "openai"
+                else bool(os.environ.get("ANTHROPIC_API_KEY"))
+            )
+            _ai_hint = (
+                f"enabled ✓  ({_chat._PROVIDER} / {_chat._MODEL})"
+                if _ai_ok
+                else f"set {'OPENAI_API_KEY' if _chat._PROVIDER == 'openai' else 'ANTHROPIC_API_KEY'} to enable"
+            )
+            print(f"AI assistant:    {_ai_hint}")
             sim_thread = threading.Thread(target=_sim_loop, args=(self.state,), daemon=True)
             sim_thread.start()
             try:
