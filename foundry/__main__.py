@@ -54,9 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Launch live tkinter GUI (default when display available)")
     p.add_argument("--tui",      action="store_true",
                    help="Launch terminal dashboard (requires `rich`)")
+    p.add_argument("--web",      action="store_true",
+                   help="Launch browser-based web GUI (HTML5 canvas + SSE)")
     p.add_argument("--gui-speed", type=float, default=10.0, dest="gui_speed",
                    metavar="TICKS_PER_SEC",
-                   help="Initial GUI simulation speed in ticks/second (default: 10)")
+                   help="Initial GUI/web simulation speed in ticks/second (default: 10)")
+    p.add_argument("--web-port", type=int, default=5050, dest="web_port",
+                   metavar="PORT",
+                   help="Port for the web GUI server (default: 5050)")
     p.add_argument("--out",      default="results",
                    help="Output directory for results CSV files")
     p.add_argument("--quiet",    action="store_true",
@@ -200,6 +205,20 @@ def run_headless(sim, args: argparse.Namespace) -> None:
         print(f"Done in {wall_elapsed:.1f}s wall time.")
 
 
+def run_with_web(sim, args: argparse.Namespace) -> None:
+    """Run with the browser-based web GUI."""
+    import importlib
+    try:
+        _web = importlib.import_module("foundry.web")
+    except ImportError as e:
+        print(f"Web GUI unavailable: {e}", file=sys.stderr)
+        run_headless(sim, args)
+        return
+    port  = getattr(args, "web_port",  5050)
+    speed = getattr(args, "gui_speed", 10.0)
+    _web.launch(sim, port=port, args=args, speed=speed)
+
+
 def run_with_gui(sim, args: argparse.Namespace) -> None:
     """Run with the tkinter GUI."""
     import importlib
@@ -275,7 +294,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sim = build_simulation(args)
 
-    if getattr(args, "gui", False):
+    if getattr(args, "web", False):
+        run_with_web(sim, args)
+    elif getattr(args, "gui", False):
         run_with_gui(sim, args)
     elif args.tui:
         run_with_tui(sim, args)
