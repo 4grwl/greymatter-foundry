@@ -39,8 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Cap sim speed to MULTIPLIER × real time (e.g. 10 = 10× faster)")
     p.add_argument("--n-skus",   type=int,   default=50,   dest="n_skus",
                    help="SKUs to generate when using stochastic order mode")
-    p.add_argument("--n-orders", type=int,   default=500,  dest="n_orders",
-                   help="Orders to generate when using stochastic order mode")
+    p.add_argument("--n-orders", type=int,   default=None,  dest="n_orders",
+                   help="Orders to generate (omit to let arrival-rate fill the window)")
+    p.add_argument("--demand-rate", type=float, default=None, dest="demand_rate",
+                   metavar="ORDERS_PER_HOUR",
+                   help="Poisson arrival rate for stochastic order generation")
+    p.add_argument("--demand-profile", default=None, dest="demand_profile",
+                   metavar="PATH",
+                   help="JSON DemandProfile file (see foundry/demand.py)")
     p.add_argument("--router",    default=None, metavar="PATH",
                    help="Router plugin .py file (must expose a `router` callable)")
     p.add_argument("--sequencer", default=None, metavar="PATH",
@@ -114,16 +120,38 @@ def build_simulation(args: argparse.Namespace):
                     seen.add(line.sku_id)
         skus = [SKU(sku_id=sid) for sid in sku_ids[: args.n_skus]]
     else:
+        # ── Load or construct demand profile ────────────────────────────
+        from foundry.demand import DemandProfile
+        profile_path = getattr(args, "demand_profile", None)
+        demand_rate  = getattr(args, "demand_rate",    None)
+        n_orders     = getattr(args, "n_orders",       None)
+
+        if profile_path and Path(profile_path).exists():
+            profile = DemandProfile.from_json(profile_path)
+            if demand_rate is not None:
+                profile.arrival_rate = demand_rate
+        elif demand_rate is not None:
+            profile = DemandProfile(arrival_rate=demand_rate)
+        else:
+            profile = None   # generate() will auto-calibrate from n_orders
+
         if not args.quiet:
-            print(f"Generating {args.n_orders} orders over {args.ticks} ticks "
+            rate_str = (f"{profile.arrival_rate:.0f} orders/hr"
+                        if profile else f"{n_orders or 500} orders")
+            print(f"Generating orders: {rate_str} over {args.ticks} ticks "
                   f"({args.n_skus} SKUs, seed={args.seed})")
+
         skus = [SKU(sku_id=f"SKU{i:04d}") for i in range(args.n_skus)]
         orders = OrderStream.generate(
-            n_orders=args.n_orders,
+            n_orders=n_orders,
             skus=[s.sku_id for s in skus],
             duration_ticks=args.ticks,
             seed=args.seed,
+            profile=profile,
         )
+
+        if not args.quiet:
+            print(f"  → {len(orders)} orders generated")
 
     # ── Slotter plugin ───────────────────────────────────────────────────
     if args.slotter:
