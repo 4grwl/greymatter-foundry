@@ -211,7 +211,7 @@ def run_with_gui(sim, args: argparse.Namespace) -> None:
         run_headless(sim, args)
         return
     speed = getattr(args, "gui_speed", 10.0)
-    _gui.launch(sim, speed=speed)
+    _gui.launch(sim, speed=speed, args=args)
 
 
 def run_with_tui(sim, args: argparse.Namespace) -> None:

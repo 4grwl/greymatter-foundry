@@ -1,29 +1,25 @@
 """
 Headless smoke tests for foundry.gui.
 
-These tests exercise the WarehouseGUI class without ever opening a real
-window by monkey-patching tkinter.Tk and the Canvas/Text/Label widgets
-so no display is required.
+All tests use a tkinter stub so no display is required.
 """
 from __future__ import annotations
 
+import argparse
+import json
+import os
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
-# Minimal simulation fixture
+# Minimal real simulation fixture
 # ---------------------------------------------------------------------------
 
-def _make_sim():
-    """Return a real (tiny) Simulation so GUI logic runs against live objects."""
-    from foundry.grid import Grid
-    from foundry.inventory import Inventory, SKU
-    from foundry.orders import OrderStream
-    from foundry.simulation import Simulation
-
+def _make_layout_file() -> str:
     layout = {
         "rows": 8, "cols": 10,
         "zones": [
@@ -32,28 +28,54 @@ def _make_sim():
             {"type": "CHARGING", "cells": [[0, 0]]},
         ],
     }
-    import json, tempfile, os
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(layout, f)
-        path = f.name
+        return f.name
+
+
+def _make_sim(layout_path: str | None = None):
+    from foundry.grid import Grid
+    from foundry.inventory import Inventory, SKU
+    from foundry.orders import OrderStream
+    from foundry.simulation import Simulation
+
+    path = layout_path or _make_layout_file()
     try:
         grid = Grid.from_json(path)
     finally:
-        os.unlink(path)
+        if layout_path is None:
+            os.unlink(path)
 
-    skus = [SKU(sku_id=f"SKU{i:03d}") for i in range(5)]
+    skus      = [SKU(sku_id=f"SKU{i:03d}") for i in range(5)]
     inventory = Inventory.build(grid, skus, seed=0)
-    orders = OrderStream.generate(n_orders=10, skus=[s.sku_id for s in skus],
-                                  duration_ticks=100, seed=0)
+    orders    = OrderStream.generate(
+        n_orders=10, skus=[s.sku_id for s in skus],
+        duration_ticks=100, seed=0,
+    )
     return Simulation(grid, inventory, orders, n_agents=2, seed=0)
 
 
+def _make_args(layout_path: str | None = None) -> argparse.Namespace:
+    return argparse.Namespace(
+        layout=layout_path or "layouts/default.json",
+        orders=None,
+        agents=2,
+        seed=0,
+        ticks=100,
+        n_skus=5,
+        n_orders=10,
+        slotter=None,
+        dispatch=None,
+        sequencer=None,
+        quiet=True,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Tkinter stub – keeps the module importable without a display
+# Tkinter stub
 # ---------------------------------------------------------------------------
 
 def _build_tk_stub():
-    """Return a module-level stub that replaces tkinter."""
     stub = types.ModuleType("tkinter")
 
     class _Var:
@@ -65,42 +87,47 @@ def _build_tk_stub():
         def __init__(self, *_a, **_kw): pass
         def pack(self, **_kw): return self
         def config(self, **_kw): return self
+        def configure(self, **_kw): return self
         def pack_propagate(self, *_): return self
         def bind(self, *_a, **_kw): return self
         def protocol(self, *_a): return self
-        def after(self, _ms, fn=None, *args):
-            if fn is not None:
+        def after(self, ms, fn=None, *args):
+            # Only execute immediately for delay=0 (UI update callbacks).
+            # Positive delays (e.g. the 4 s status auto-clear) are no-ops
+            # in the stub so timed state changes don't race in tests.
+            if fn is not None and ms == 0:
                 fn(*args)
         def destroy(self): pass
         def mainloop(self): pass
         def winfo_width(self): return 400
         def winfo_height(self): return 300
+        def winfo_children(self): return []
         def delete(self, *_): pass
         def create_rectangle(self, *_a, **_kw): return 1
         def create_oval(self, *_a, **_kw): return 1
         def index(self, _): return "200.0"
         def insert(self, *_): pass
         def see(self, _): pass
-
-    class Tk(_Widget):
-        def configure(self, **_): pass
         def resizable(self, *_): pass
         def title(self, _): pass
 
+    class Tk(_Widget): pass
     class Canvas(_Widget): pass
     class Frame(_Widget): pass
     class Label(_Widget): pass
     class Button(_Widget): pass
     class Scale(_Widget): pass
     class Text(_Widget): pass
+    class Checkbutton(_Widget): pass
 
-    stub.Tk     = Tk
-    stub.Canvas = Canvas
-    stub.Frame  = Frame
-    stub.Label  = Label
-    stub.Button = Button
-    stub.Scale  = Scale
-    stub.Text   = Text
+    stub.Tk         = Tk
+    stub.Canvas     = Canvas
+    stub.Frame      = Frame
+    stub.Label      = Label
+    stub.Button     = Button
+    stub.Scale      = Scale
+    stub.Text       = Text
+    stub.Checkbutton = Checkbutton
     stub.DoubleVar  = _Var
     stub.StringVar  = _Var
     stub.BooleanVar = _Var
@@ -117,20 +144,24 @@ def _build_tk_stub():
     stub.font = font_stub
     sys.modules["tkinter.font"] = font_stub
 
+    # filedialog stub
+    fd_stub = types.ModuleType("tkinter.filedialog")
+    fd_stub.askopenfilename = lambda **_kw: ""
+    stub.filedialog = fd_stub
+    sys.modules["tkinter.filedialog"] = fd_stub
+
     return stub
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Base test class — installs / tears down the tkinter stub
 # ---------------------------------------------------------------------------
 
-class TestWarehouseGUIConstruction(unittest.TestCase):
-
+class _GUITestBase(unittest.TestCase):
     def setUp(self):
         self._orig_tk = sys.modules.get("tkinter")
         stub = _build_tk_stub()
         sys.modules["tkinter"] = stub
-        # Remove cached gui module so it re-imports with stub
         sys.modules.pop("foundry.gui", None)
 
     def tearDown(self):
@@ -140,14 +171,20 @@ class TestWarehouseGUIConstruction(unittest.TestCase):
         else:
             sys.modules["tkinter"] = self._orig_tk
 
-    def _make_gui(self, speed=10.0):
+    def _make_gui(self, speed=10.0, args=None):
         from foundry.gui import WarehouseGUI
         sim = _make_sim()
-        return WarehouseGUI(sim, speed=speed)
+        return WarehouseGUI(sim, speed=speed, args=args)
+
+
+# ---------------------------------------------------------------------------
+# Construction & basic state
+# ---------------------------------------------------------------------------
+
+class TestWarehouseGUIConstruction(_GUITestBase):
 
     def test_construction_does_not_raise(self):
-        gui = self._make_gui()
-        self.assertIsNotNone(gui)
+        self.assertIsNotNone(self._make_gui())
 
     def test_speed_stored(self):
         gui = self._make_gui(speed=42.5)
@@ -158,6 +195,11 @@ class TestWarehouseGUIConstruction(unittest.TestCase):
         self.assertFalse(gui._running)
         self.assertFalse(gui._stopped)
 
+    def test_args_stored(self):
+        args = _make_args()
+        gui  = self._make_gui(args=args)
+        self.assertIs(gui._args, args)
+
     def test_kpi_vars_keys(self):
         gui = self._make_gui()
         expected = {
@@ -166,6 +208,29 @@ class TestWarehouseGUIConstruction(unittest.TestCase):
             "avg_battery_pct",
         }
         self.assertEqual(set(gui._kpi_vars.keys()), expected)
+
+    def test_optimal_overlay_populated_after_init(self):
+        """ABC overlay should be non-empty after construction (grid has racks)."""
+        gui = self._make_gui()
+        self.assertGreater(len(gui._optimal_overlay), 0)
+
+    def test_optimal_overlay_values_are_valid_colours(self):
+        gui = self._make_gui()
+        from foundry.gui import ABC_COLOUR
+        valid = set(ABC_COLOUR.values())
+        for colour in gui._optimal_overlay.values():
+            self.assertIn(colour, valid)
+
+    def test_show_optimal_starts_false(self):
+        gui = self._make_gui()
+        self.assertFalse(gui._show_optimal)
+
+
+# ---------------------------------------------------------------------------
+# Controls
+# ---------------------------------------------------------------------------
+
+class TestControls(_GUITestBase):
 
     def test_on_play_sets_running(self):
         gui = self._make_gui()
@@ -185,67 +250,229 @@ class TestWarehouseGUIConstruction(unittest.TestCase):
         self.assertFalse(gui._running)
         self.assertTrue(gui._stopped)
 
-    def test_redraw_does_not_raise(self):
-        gui = self._make_gui()
-        gui._redraw()   # should not throw
 
-    def test_append_events_empty(self):
-        gui = self._make_gui()
-        gui._append_events([])  # should not throw
+# ---------------------------------------------------------------------------
+# Drawing
+# ---------------------------------------------------------------------------
 
-    def test_append_events_with_data(self):
-        gui = self._make_gui()
-        events = [
-            {"type": "ORDER_COMPLETE", "agent": "AMR-00", "tick": 5},
-            {"type": "PICKING",        "agent": "AMR-01", "tick": 7},
-        ]
-        gui._append_events(events)  # should not throw
+class TestDrawing(_GUITestBase):
 
-    def test_cell_px_minimum(self):
+    def test_redraw_normal_mode_does_not_raise(self):
         gui = self._make_gui()
-        # winfo_width/height return 400/300 from stub
+        gui._redraw()
+
+    def test_redraw_optimal_mode_does_not_raise(self):
+        gui = self._make_gui()
+        gui._show_optimal = True
+        gui._redraw()
+
+    def test_cell_px_within_bounds(self):
+        gui = self._make_gui()
         px = gui._cell_px()
         self.assertGreaterEqual(px, gui.MIN_CELL_PX)
         self.assertLessEqual(px, gui.MAX_CELL_PX)
 
+    def test_append_events_empty(self):
+        gui = self._make_gui()
+        gui._append_events([])
 
-class TestLaunchFunction(unittest.TestCase):
-    """Smoke-test the public launch() entry point (doesn't call mainloop)."""
+    def test_append_events_with_data(self):
+        gui = self._make_gui()
+        gui._append_events([
+            {"type": "ORDER_COMPLETE", "agent": "AMR-00", "tick": 5},
+            {"type": "PICKING",        "agent": "AMR-01", "tick": 7},
+        ])
 
-    def setUp(self):
-        self._orig_tk = sys.modules.get("tkinter")
-        stub = _build_tk_stub()
-        sys.modules["tkinter"] = stub
-        sys.modules.pop("foundry.gui", None)
 
-    def tearDown(self):
-        sys.modules.pop("foundry.gui", None)
-        if self._orig_tk is None:
-            sys.modules.pop("tkinter", None)
-        else:
-            sys.modules["tkinter"] = self._orig_tk
+# ---------------------------------------------------------------------------
+# Optimal layout overlay
+# ---------------------------------------------------------------------------
 
-    def test_launch_creates_gui(self):
-        """launch() should build a WarehouseGUI without errors."""
+class TestOptimalOverlay(_GUITestBase):
+
+    def test_overlay_covers_all_accessible_racks(self):
+        """Every accessible rack cell should appear in the overlay."""
+        from foundry.grid import Cell
+        from foundry.inventory import _find_pick_pos
+
+        gui  = self._make_gui()
+        grid = gui.sim.grid
+        accessible = {
+            pos for pos in grid.cells_of_type(Cell.RACK)
+            if _find_pick_pos(grid, pos) is not None
+        }
+        self.assertEqual(set(gui._optimal_overlay.keys()), accessible)
+
+    def test_nearest_cells_are_a_class(self):
+        """The cell closest to the dock must be coloured A-class."""
+        from foundry.grid import Cell
+        from foundry.gui import ABC_COLOUR
+
+        gui   = self._make_gui()
+        grid  = gui.sim.grid
+        docks = grid.cells_of_type(Cell.DOCK)
+
+        def dock_dist(pos):
+            return min(abs(pos[0] - d[0]) + abs(pos[1] - d[1]) for d in docks)
+
+        nearest = min(gui._optimal_overlay.keys(), key=dock_dist)
+        self.assertEqual(gui._optimal_overlay[nearest], ABC_COLOUR["A"])
+
+    def test_farthest_cells_are_c_class(self):
+        """The cell farthest from the dock must be coloured C-class."""
+        from foundry.grid import Cell
+        from foundry.gui import ABC_COLOUR
+
+        gui   = self._make_gui()
+        grid  = gui.sim.grid
+        docks = grid.cells_of_type(Cell.DOCK)
+
+        def dock_dist(pos):
+            return min(abs(pos[0] - d[0]) + abs(pos[1] - d[1]) for d in docks)
+
+        farthest = max(gui._optimal_overlay.keys(), key=dock_dist)
+        self.assertEqual(gui._optimal_overlay[farthest], ABC_COLOUR["C"])
+
+    def test_toggle_flips_show_optimal(self):
+        gui = self._make_gui()
+        self.assertFalse(gui._show_optimal)
+        gui._optimal_var.set(True)
+        gui._on_toggle_optimal()
+        self.assertTrue(gui._show_optimal)
+        gui._optimal_var.set(False)
+        gui._on_toggle_optimal()
+        self.assertFalse(gui._show_optimal)
+
+    def test_toggle_redraw_does_not_raise(self):
+        gui = self._make_gui()
+        gui._optimal_var.set(True)
+        gui._on_toggle_optimal()
+        gui._redraw()
+        gui._optimal_var.set(False)
+        gui._on_toggle_optimal()
+        gui._redraw()
+
+
+# ---------------------------------------------------------------------------
+# Config panel / file loading
+# ---------------------------------------------------------------------------
+
+class TestConfigPanel(_GUITestBase):
+
+    def test_load_layout_updates_var_on_valid_path(self):
+        layout_path = _make_layout_file()
+        try:
+            gui = self._make_gui()
+            # Patch filedialog to return our layout file
+            sys.modules["tkinter.filedialog"].askopenfilename = lambda **_: layout_path
+            gui._load_layout()
+            self.assertEqual(gui._args.layout, layout_path)
+            import os
+            self.assertEqual(gui._layout_var.get(), os.path.basename(layout_path))
+        finally:
+            os.unlink(layout_path)
+
+    def test_load_layout_no_op_on_cancel(self):
+        gui = self._make_gui(args=_make_args())
+        original = gui._args.layout
+        sys.modules["tkinter.filedialog"].askopenfilename = lambda **_: ""
+        gui._load_layout()
+        self.assertEqual(gui._args.layout, original)
+
+    def test_load_orders_updates_var(self):
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            f.write(b"order_id,sku_id,qty,arrive_at\n")
+            csv_path = f.name
+        try:
+            gui = self._make_gui()
+            sys.modules["tkinter.filedialog"].askopenfilename = lambda **_: csv_path
+            gui._load_orders()
+            self.assertEqual(gui._args.orders, csv_path)
+        finally:
+            os.unlink(csv_path)
+
+    def test_load_orders_no_op_on_cancel(self):
+        gui = self._make_gui(args=_make_args())
+        sys.modules["tkinter.filedialog"].askopenfilename = lambda **_: ""
+        gui._load_orders()
+        self.assertIsNone(gui._args.orders)   # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Rebuild simulation
+# ---------------------------------------------------------------------------
+
+class TestRebuildSimulation(_GUITestBase):
+
+    def test_rebuild_replaces_sim(self):
+        layout_path = _make_layout_file()
+        try:
+            gui = self._make_gui(args=_make_args(layout_path))
+            old_sim = gui.sim
+            gui._rebuild_simulation()
+            # A new Simulation object must have been installed
+            self.assertIsNot(gui.sim, old_sim)
+        finally:
+            os.unlink(layout_path)
+
+    def test_rebuild_recomputes_overlay(self):
+        layout_path = _make_layout_file()
+        try:
+            gui = self._make_gui(args=_make_args(layout_path))
+            gui._optimal_overlay = {}   # clear it
+            gui._rebuild_simulation()
+            self.assertGreater(len(gui._optimal_overlay), 0)
+        finally:
+            os.unlink(layout_path)
+
+    def test_rebuild_without_args_sets_error_status(self):
+        gui = self._make_gui(args=None)
+        gui._rebuild_simulation()
+        # Status message should be set (non-empty)
+        self.assertNotEqual(gui._status_var.get(), "")
+
+    def test_rebuild_preserves_running_state(self):
+        layout_path = _make_layout_file()
+        try:
+            gui = self._make_gui(args=_make_args(layout_path))
+            gui._running = True
+            gui._rebuild_simulation()
+            self.assertTrue(gui._running)
+        finally:
+            os.unlink(layout_path)
+
+
+# ---------------------------------------------------------------------------
+# launch() entry point
+# ---------------------------------------------------------------------------
+
+class TestLaunchFunction(_GUITestBase):
+
+    def test_launch_passes_args(self):
         from foundry import gui as gui_mod
-        sim = _make_sim()
+        sim  = _make_sim()
+        args = _make_args()
 
         created = []
         _orig = gui_mod.WarehouseGUI
 
-        class _PatchedGUI(_orig):
+        class _Patched(_orig):
             def run(self):
-                created.append(self)   # capture; don't actually run mainloop
+                created.append(self)
 
-        with patch.object(gui_mod, "WarehouseGUI", _PatchedGUI):
-            gui_mod.launch(sim, speed=5.0)
+        with patch.object(gui_mod, "WarehouseGUI", _Patched):
+            gui_mod.launch(sim, speed=5.0, args=args)
 
         self.assertEqual(len(created), 1)
         self.assertAlmostEqual(created[0].speed, 5.0)
+        self.assertIs(created[0]._args, args)
 
+
+# ---------------------------------------------------------------------------
+# CLI routing
+# ---------------------------------------------------------------------------
 
 class TestMainGUIBranch(unittest.TestCase):
-    """Verify that --gui flag routes to run_with_gui in __main__."""
 
     def setUp(self):
         self._orig_tk = sys.modules.get("tkinter")
@@ -260,26 +487,26 @@ class TestMainGUIBranch(unittest.TestCase):
         else:
             sys.modules["tkinter"] = self._orig_tk
 
-    def test_run_with_gui_called_on_flag(self):
-        import argparse
+    def test_run_with_gui_passes_args(self):
         from foundry import __main__ as m
 
-        sim = _make_sim()
-        called_with = []
+        sim        = _make_sim()
+        called     = []
+        fake_gui   = types.ModuleType("foundry.gui")
 
-        # Build a fake gui module and inject it so run_with_gui picks it up
-        fake_gui = types.ModuleType("foundry.gui")
-        def _fake_launch(s, speed=10.0):
-            called_with.append((s, speed))
+        def _fake_launch(s, speed=10.0, args=None):
+            called.append({"sim": s, "speed": speed, "args": args})
+
         fake_gui.launch = _fake_launch
         sys.modules["foundry.gui"] = fake_gui
 
-        args = argparse.Namespace(gui=True, gui_speed=20.0)
-        m.run_with_gui(sim, args)
+        ns = argparse.Namespace(gui=True, gui_speed=20.0)
+        m.run_with_gui(sim, ns)
 
-        self.assertEqual(len(called_with), 1)
-        self.assertIs(called_with[0][0], sim)
-        self.assertAlmostEqual(called_with[0][1], 20.0)
+        self.assertEqual(len(called), 1)
+        self.assertIs(called[0]["sim"], sim)
+        self.assertAlmostEqual(called[0]["speed"], 20.0)
+        self.assertIs(called[0]["args"], ns)
 
 
 if __name__ == "__main__":
