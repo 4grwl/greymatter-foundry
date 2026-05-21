@@ -236,13 +236,15 @@ def run_headless(sim, args: argparse.Namespace) -> None:
 def run_with_web(sim, args: argparse.Namespace) -> None:
     """Run with the browser-based web GUI."""
     import importlib
+    import os
     try:
         _web = importlib.import_module("foundry.web")
     except ImportError as e:
         print(f"Web GUI unavailable: {e}", file=sys.stderr)
         run_headless(sim, args)
         return
-    port  = getattr(args, "web_port",  5050)
+    # Honour the PORT env var set by preview tools; fall back to --web-port
+    port  = int(os.environ.get("PORT", getattr(args, "web_port", 5050)))
     speed = getattr(args, "gui_speed", 10.0)
     _web.launch(sim, port=port, args=args, speed=speed)
 

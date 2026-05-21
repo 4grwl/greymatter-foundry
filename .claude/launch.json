@@ -18,8 +18,9 @@
     {
       "name": "foundry-web",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "foundry", "--web", "--web-port", "5050", "--agents", "5", "--seed", "42"],
-      "port": 5050
+      "runtimeArgs": ["-m", "foundry", "--web", "--agents", "5", "--seed", "42"],
+      "port": 5050,
+      "autoPort": true
     },
     {
       "name": "foundry-tui",
